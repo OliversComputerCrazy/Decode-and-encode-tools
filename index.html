@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Safe Layered Decoder with File Downloads</title>
+<style>
+body { font-family: monospace; background: #121212; color: #eee; padding: 20px; }
+textarea, pre { width: 100%; padding: 10px; margin-top: 10px; font-size: 14px; }
+textarea { height: 120px; }
+button { margin: 10px 5px 0 0; padding: 10px 15px; border: none; border-radius: 6px;
+         background: #4a90e2; color: white; cursor: pointer; font-size: 14px; }
+button:hover { background: #357ABD; }
+.output { margin-top: 20px; }
+.decoder { margin-bottom: 15px; padding: 10px; background: #1e1e1e; border-radius: 8px; }
+.decoder summary { cursor: pointer; font-weight: bold; color: #4a90e2; }
+a.download { color:#4a90e2; text-decoration:none; font-weight:bold; }
+</style>
+</head>
+<body>
+<h2>Decoder tool</h2>
+<p>Paste in encoded text, binary, morse code, ect. If the output is a binary file, you can download it as a working file!</p>
+<textarea id="input"></textarea>
+<br>
+<label><input type="checkbox" id="recursive"> Recursive decode</label>
+<button onclick="decode()">Decode</button>
+<div class="output" id="output"></div>
+
+<script>
+// Morse, Base32, file signatures
+const morseMap={".-":"A","-...":"B","-.-.":"C","-..":"D",".":"E","..-.":"F","--.":"G","....":"H","..":"I",".---":"J","-.-":"K",".-..":"L","--":"M","-.":"N","---":"O",".--.":"P","--.-":"Q",".-.":"R","...":"S","-":"T","..-":"U","...-":"V",".--":"W","-..-":"X","-.--":"Y","--..":"Z","-----":"0",".----":"1","..---":"2","...--":"3","....-":"4",".....":"5","-....":"6","--...":"7","---..":"8","----.":"9"};
+const fileSignatures = {
+  "89504E47": "PNG image",
+  "FFD8FF": "JPEG image",
+  "47494638": "GIF image",
+  "25504446": "PDF document",
+  "504B0304": "ZIP archive",
+  "52494646": "WebP image",  // RIFF header for WebP
+  "1F8B08": "GZIP compressed",
+  "424D": "BMP image",
+  "7F454C46": "ELF executable",
+  "4D5A": "Windows EXE/DLL (MZ header)",
+  "494433": "MP3 audio"
+};
+
+function decodeMorse(str){return str.split(" / ").map(word=>word.split(" ").map(c=>morseMap[c]||"?").join("")).join(" ");}
+
+function base32Decode(str){
+  const alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; let bits="",output="";
+  str=str.replace(/=+$/,"").toUpperCase();
+  for(let c of str){let val=alphabet.indexOf(c);if(val===-1)continue;bits+=val.toString(2).padStart(5,"0");}
+  for(let i=0;i+8<=bits.length;i+=8){output+=String.fromCharCode(parseInt(bits.substr(i,8),2));}
+  return output;
+}
+
+function detectFileType(hexStr){for(let sig in fileSignatures){if(hexStr.toUpperCase().startsWith(sig)) return fileSignatures[sig];} return null;}
+function getFilenameBySignature(bytes){
+  const hex = bytes.slice(0,4).map(b=>b.toString(16).padStart(2,"0")).join("").toUpperCase();
+  const type = fileSignatures[hex];
+  if(type){ const ext = type.split(" ")[0].toLowerCase(); return `decoded.${ext}`; }
+  return "decoded.bin";
+}
+function createDownloadLink(dataBytes, filename){
+  const blob=new Blob([new Uint8Array(dataBytes)],{type:"application/octet-stream"});
+  const url=URL.createObjectURL(blob);
+  return `<a href="${url}" download="${filename}" class="download">⬇ Download ${filename}</a>`;
+}
+function isMostlyPrintable(str){let count=0; for(let c of str){if(c>=' '&&c<='~')count++;} return (count/str.length)>0.8;}
+
+// Decoders
+const decoders={
+"Binary": input=>{if(/^[01\s]+$/.test(input)){let bits=input.replace(/\s+/g,""),bytes=[];for(let i=0;i<bits.length;i+=8)bytes.push(parseInt(bits.substr(i,8),2));return bytes;}return null;},
+"Hex": input=>{if(/^[0-9a-fA-F\s]+$/.test(input)){let hex=input.replace(/\s+/g,"");let bytes=hex.match(/.{1,2}/g).map(b=>parseInt(b,16));return bytes;}return null;},
+"Base64": input=>{try{return [...atob(input)].map(c=>c.charCodeAt(0));}catch{return null;}},
+"Base32": input=>{try{return [...base32Decode(input)].map(c=>c.charCodeAt(0));}catch{return null;}},
+"Morse": input=>{try{return [...decodeMorse(input)].map(c=>c.charCodeAt(0));}catch{return null;}}
+};
+
+// Check if decoder likely matches input
+function isLikelyEncoding(input, decoder){
+  switch(decoder){
+    case "Base64": return /^[A-Za-z0-9+/=\s]+$/.test(input) && input.length>=4;
+    case "Base32": return /^[A-Z2-7=\s]+$/.test(input.toUpperCase()) && input.length>=8;
+    case "Binary": return /^[01\s]+$/.test(input) && input.length>=8;
+    case "Hex": return /^[0-9a-fA-F\s]+$/.test(input) && input.length>=2;
+    case "Morse": return /^[.\- \/]+$/.test(input) && input.length>=2;
+  }
+  return false;
+}
+
+// Safe recursive layered decode
+function decodeLayerSafe(input, sequence=[], maxDepth=5, seen=new Set()){
+  if(sequence.length>=maxDepth) return [];
+  const results=[];
+  for(const dec of Object.keys(decoders)){
+    if(!isLikelyEncoding(input, dec)) continue;
+    const bytes=decoders[dec](input);
+    if(!bytes) continue;
+    const hash=bytes.join(",");
+    if(seen.has(hash)) continue;
+    seen.add(hash);
+    const nextSequence=sequence.concat([dec]);
+    results.push({sequence: nextSequence, bytes});
+    const nextInput=String.fromCharCode(...bytes);
+    results.push(...decodeLayerSafe(nextInput,nextSequence,maxDepth,seen));
+  }
+  return results;
+}
+
+// Main decode
+function decode(){
+  const input=document.getElementById("input").value.trim();
+  const recursive=document.getElementById("recursive").checked;
+  const out=document.getElementById("output");
+  out.innerHTML="";
+
+  if(!input){out.innerHTML="<p>Paste something to decode</p>"; return;}
+
+  let results=[];
+  if(!recursive){
+    for(let dec of Object.keys(decoders)){
+      if(!isLikelyEncoding(input, dec)) continue;
+      const bytes=decoders[dec](input);
+      if(bytes) results.push({sequence:[dec], bytes});
+    }
+  } else {
+    results=decodeLayerSafe(input,[],5,new Set());
+  }
+
+  if(results.length===0){out.innerHTML="<p>No decoding possible</p>"; return;}
+
+  for(let r of results){
+    const hex=r.bytes.map(b=>b.toString(16).padStart(2,"0")).join("").toUpperCase();
+    const file=detectFileType(hex);
+    const filename=getFilenameBySignature(r.bytes);
+    let display="";
+    if(file) {
+      display=`Detected File: ${file}<br>`+createDownloadLink(r.bytes,filename);
+    } else if(isMostlyPrintable(String.fromCharCode(...r.bytes))) {
+      display=String.fromCharCode(...r.bytes);
+    } else {
+      const hexPreview=hex.slice(0,32)+'...';
+      display=`Non-text binary (${r.bytes.length} bytes)<br>Hex preview: ${hexPreview}<br>`+createDownloadLink(r.bytes,filename);
+    }
+    out.innerHTML+=`<details class="decoder"><summary>Sequence: ${r.sequence.join(" → ")}</summary><pre>${display}</pre></details>`;
+  }
+}
+</script>
+</body>
+</html>
